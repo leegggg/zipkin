@@ -192,7 +192,10 @@ final class CassandraSpanConsumer implements SpanConsumer {
               .setString("trace_id", traceId);
 
       if (null != duration) {
-        bound = bound.setLong("duration", duration);
+        // round up to tens of milliseconds (or hundredths of seconds)
+        long durationMillis = TimeUnit.MICROSECONDS.toMillis(duration);
+        long durationRoundedUp = durationMillis + (10 - durationMillis % 10);
+        bound = bound.setLong("duration", durationRoundedUp);
       }
       session.executeAsync(bound);
     } catch (RuntimeException ignore) {
