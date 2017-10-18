@@ -101,7 +101,7 @@ final class CassandraSpanStore implements SpanStore {
 
     selectTraces = session.prepare(
         QueryBuilder.select(
-                "trace_id", "id", "ts", "span", "parent_id",
+                "trace_id", "trace_id_high", "id", "ts", "span", "parent_id",
                 "duration", "l_ep", "r_ep", "annotations", "tags", "shared")
             .from(TABLE_SPAN)
             .where(QueryBuilder.in("trace_id", QueryBuilder.bindMarker("trace_id")))
@@ -171,6 +171,10 @@ final class CassandraSpanStore implements SpanStore {
 
     rowToSpan = row -> {
       String traceId = row.getString("trace_id");
+      if (!strictTraceId) {
+        String traceIdHigh = row.getString("trace_id_high");
+        if (traceIdHigh != null) traceId = traceIdHigh + traceId;
+      }
       Span.Builder builder = Span.newBuilder()
           .traceId(traceId)
           .id(row.getString("id"))
@@ -287,9 +291,16 @@ final class CassandraSpanStore implements SpanStore {
   }
 
   @Override public Call<List<Span>> getTrace(String traceId) {
+    // make sure we have a 16 or 32 character trace ID
+    traceId = Span.normalizeTraceId(traceId);
+
+    // Unless we are strict, truncate the trace ID to 64bit (encoded as 16 characters)
+    if (!strictTraceId && traceId.length() == 32) traceId = traceId.substring(16);
+
+    Set<String> traceIds = Collections.singleton(traceId);
     return new ListenableFutureCall<List<Span>>() {
       @Override protected ListenableFuture<List<Span>> newFuture() {
-        return getSpansByTraceIds(Collections.singleton(traceId), maxTraceCols);
+        return getSpansByTraceIds(traceIds, maxTraceCols);
       }
     };
   }

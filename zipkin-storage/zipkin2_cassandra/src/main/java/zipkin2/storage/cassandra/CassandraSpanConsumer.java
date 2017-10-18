@@ -58,6 +58,7 @@ final class CassandraSpanConsumer implements SpanConsumer {
         QueryBuilder
             .insertInto(Schema.TABLE_SPAN)
             .value("trace_id", QueryBuilder.bindMarker("trace_id"))
+            .value("trace_id_high", QueryBuilder.bindMarker("trace_id_high"))
             .value("ts_uuid", QueryBuilder.bindMarker("ts_uuid"))
             .value("id", QueryBuilder.bindMarker("id"))
             .value("ts", QueryBuilder.bindMarker("ts"))
@@ -130,7 +131,6 @@ final class CassandraSpanConsumer implements SpanConsumer {
               .collect(Collectors.toList());
 
       BoundStatement bound = bindWithName(insertSpan, "insert-span")
-          .setString("trace_id", span.traceId())
           .setUUID("ts_uuid", new UUID(
               UUIDs.startOf(timestamp / 1000).getMostSignificantBits(),
               UUIDs.random().getLeastSignificantBits()))
@@ -162,8 +162,11 @@ final class CassandraSpanConsumer implements SpanConsumer {
       }
 
       if (!strictTraceId && span.traceId().length() == 32) {
-          // store the span twice, once for 128-bit ID and once for the lower 64 bits
-          storeSpan(span.toBuilder().traceId(span.traceId().substring(16)).build(), timestamp);
+        bound = bound
+                  .setString("trace_id", span.traceId().substring(16))
+                  .setString("trace_id_high", span.traceId().substring(0, 16));
+      } else {
+        bound = bound.setString("trace_id", span.traceId());
       }
       session.executeAsync(bound);
     } catch (RuntimeException ignore) {

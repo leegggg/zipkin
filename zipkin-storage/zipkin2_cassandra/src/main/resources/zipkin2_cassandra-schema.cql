@@ -15,8 +15,9 @@ CREATE TYPE IF NOT EXISTS zipkin2_cassandra.annotation (
 );
 
 CREATE TABLE IF NOT EXISTS zipkin2_cassandra.span (
-    trace_id            text,
+    trace_id            text, // when strictTraceId=false, only contains right-most 16 chars
     ts_uuid             timeuuid,
+    trace_id_high       text, // when strictTraceId=false, contains left-most 16 chars if present
     id                  text,
     ts                  bigint,
     span                text,
