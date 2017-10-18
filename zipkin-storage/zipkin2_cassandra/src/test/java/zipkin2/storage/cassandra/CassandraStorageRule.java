@@ -82,7 +82,7 @@ public class CassandraStorageRule extends ExternalResource {
     return result;
   }
 
-  CassandraStorage.Builder computeStorageBuilder() {
+  public CassandraStorage.Builder computeStorageBuilder() {
     return CassandraStorage.newBuilder()
       .contactPoints(contactPoints())
       .ensureSchema(true)

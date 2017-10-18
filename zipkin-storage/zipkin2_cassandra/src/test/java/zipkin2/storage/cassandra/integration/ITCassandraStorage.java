@@ -83,12 +83,12 @@ public class ITCassandraStorage {
   public static class StrictTraceIdFalseTest extends CassandraStrictTraceIdFalseTest {
     @ClassRule public static CassandraStorageRule storage = classRule();
 
-    @Override protected StorageComponent v2Storage() {
-      return storage.get();
-    }
-
     @Override public void clear() {
       storage.clear();
+    }
+
+    @Override protected CassandraStorage.Builder storageBuilder() {
+      return storage.computeStorageBuilder();
     }
   }
 }
