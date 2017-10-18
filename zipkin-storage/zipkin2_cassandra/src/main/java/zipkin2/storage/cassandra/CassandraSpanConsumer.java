@@ -60,10 +60,11 @@ final class CassandraSpanConsumer implements SpanConsumer {
             .value("trace_id", QueryBuilder.bindMarker("trace_id"))
             .value("trace_id_high", QueryBuilder.bindMarker("trace_id_high"))
             .value("ts_uuid", QueryBuilder.bindMarker("ts_uuid"))
-            .value("id", QueryBuilder.bindMarker("id"))
-            .value("ts", QueryBuilder.bindMarker("ts"))
-            .value("span", QueryBuilder.bindMarker("span"))
             .value("parent_id", QueryBuilder.bindMarker("parent_id"))
+            .value("id", QueryBuilder.bindMarker("id"))
+            .value("kind", QueryBuilder.bindMarker("kind"))
+            .value("span", QueryBuilder.bindMarker("span"))
+            .value("ts", QueryBuilder.bindMarker("ts"))
             .value("duration", QueryBuilder.bindMarker("duration"))
             .value("l_ep", QueryBuilder.bindMarker("l_ep"))
             .value("l_service", QueryBuilder.bindMarker("l_service"))
@@ -71,6 +72,7 @@ final class CassandraSpanConsumer implements SpanConsumer {
             .value("annotations", QueryBuilder.bindMarker("annotations"))
             .value("tags", QueryBuilder.bindMarker("tags"))
             .value("shared", QueryBuilder.bindMarker("shared"))
+            .value("debug", QueryBuilder.bindMarker("debug"))
             .value("annotation_query", QueryBuilder.bindMarker("annotation_query")));
 
     insertTraceServiceSpanName = session.prepare(
@@ -126,28 +128,34 @@ final class CassandraSpanConsumer implements SpanConsumer {
    */
   void storeSpan(Span span, long timestamp) {
     try {
-      List<AnnotationUDT> annotations = span.annotations().stream()
-              .map(a -> new AnnotationUDT(a))
-              .collect(Collectors.toList());
+      boolean traceIdHigh = !strictTraceId && span.traceId().length() == 32;
 
+      // start with the partition key
       BoundStatement bound = bindWithName(insertSpan, "insert-span")
-          .setUUID("ts_uuid", new UUID(
-              UUIDs.startOf(timestamp / 1000).getMostSignificantBits(),
-              UUIDs.random().getLeastSignificantBits()))
-          .setString("id", span.id())
-          .setString("span", span.name())
-          .setList("annotations", annotations)
-          .setMap("tags", span.tags())
-          .setString("annotation_query", Joiner.on(',').join(CassandraUtil.annotationKeys(span)));
+        .setUUID("ts_uuid", new UUID(
+          UUIDs.startOf(timestamp / 1000).getMostSignificantBits(),
+          UUIDs.random().getLeastSignificantBits()))
+        .setString("trace_id", traceIdHigh ? span.traceId().substring(16) : span.traceId())
+        .setString("id", span.id());
 
+      // now set the data fields
+      if (traceIdHigh) {
+        bound = bound.setString("trace_id_high", span.traceId().substring(0, 16));
+      }
+      if (null != span.parentId()) {
+        bound = bound.setString("parent_id", span.parentId());
+      }
+      if (null != span.kind()) {
+        bound = bound.setString("kind", span.kind().name());
+      }
+      if (null != span.name()) {
+        bound = bound.setString("span", span.name());
+      }
       if (null != span.timestamp()) {
         bound = bound.setLong("ts", span.timestamp());
       }
       if (null != span.duration()) {
         bound = bound.setLong("duration", span.duration());
-      }
-      if (null != span.parentId()) {
-        bound = bound.setString("parent_id", span.parentId());
       }
       if (null != span.localEndpoint()) {
         bound = bound
@@ -157,16 +165,22 @@ final class CassandraSpanConsumer implements SpanConsumer {
       if (null != span.remoteEndpoint()) {
         bound = bound.set("r_ep", new EndpointUDT(span.remoteEndpoint()), EndpointUDT.class);
       }
+      if (!span.annotations().isEmpty()) {
+        List<AnnotationUDT> annotations = span.annotations().stream()
+          .map(a -> new AnnotationUDT(a))
+          .collect(Collectors.toList());
+        bound = bound
+          .setList("annotations", annotations)
+          .setString("annotation_query", Joiner.on(',').join(CassandraUtil.annotationKeys(span)));
+      }
+      if (!span.tags().isEmpty()) {
+        bound = bound.setMap("tags", span.tags());
+      }
       if (null != span.shared()) {
         bound = bound.setBool("shared", span.shared());
       }
-
-      if (!strictTraceId && span.traceId().length() == 32) {
-        bound = bound
-                  .setString("trace_id", span.traceId().substring(16))
-                  .setString("trace_id_high", span.traceId().substring(0, 16));
-      } else {
-        bound = bound.setString("trace_id", span.traceId());
+      if (null != span.debug()) {
+        bound = bound.setBool("debug", span.debug());
       }
       session.executeAsync(bound);
     } catch (RuntimeException ignore) {

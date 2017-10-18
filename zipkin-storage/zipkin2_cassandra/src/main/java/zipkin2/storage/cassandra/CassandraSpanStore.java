@@ -101,8 +101,8 @@ final class CassandraSpanStore implements SpanStore {
 
     selectTraces = session.prepare(
         QueryBuilder.select(
-                "trace_id", "trace_id_high", "id", "ts", "span", "parent_id",
-                "duration", "l_ep", "r_ep", "annotations", "tags", "shared")
+                "trace_id_high", "trace_id", "parent_id", "id", "kind", "span", "ts",
+                "duration", "l_ep", "r_ep", "annotations", "tags", "shared", "debug")
             .from(TABLE_SPAN)
             .where(QueryBuilder.in("trace_id", QueryBuilder.bindMarker("trace_id")))
             .limit(QueryBuilder.bindMarker("limit_")));
@@ -177,18 +177,19 @@ final class CassandraSpanStore implements SpanStore {
       }
       Span.Builder builder = Span.newBuilder()
           .traceId(traceId)
+          .parentId(row.getString("parent_id"))
           .id(row.getString("id"))
           .name(row.getString("span"))
-          .duration(row.getLong("duration"));
+          .timestamp(row.getLong("ts"));
 
-      if (!row.isNull("ts")) {
-        builder = builder.timestamp(row.getLong("ts"));
-      }
       if (!row.isNull("duration")) {
-        builder = builder.duration(row.getLong("duration"));
+        builder.duration(row.getLong("duration"));
       }
-      if (!row.isNull("parent_id")) {
-        builder = builder.parentId(row.getString("parent_id"));
+      if (!row.isNull("kind")) {
+        try {
+          builder.kind(Span.Kind.valueOf(row.getString("kind")));
+        } catch (IllegalArgumentException ignored) {
+        }
       }
       if (!row.isNull("l_ep")) {
         builder = builder.localEndpoint(row.get("l_ep", Schema.EndpointUDT.class).toEndpoint());
@@ -198,6 +199,9 @@ final class CassandraSpanStore implements SpanStore {
       }
       if (!row.isNull("shared")) {
         builder = builder.shared(row.getBool("shared"));
+      }
+      if (!row.isNull("debug")) {
+        builder = builder.shared(row.getBool("debug"));
       }
       for (AnnotationUDT udt : row.getList("annotations", AnnotationUDT.class)) {
         builder = builder.addAnnotation(udt.toAnnotation().timestamp(), udt.toAnnotation().value());
