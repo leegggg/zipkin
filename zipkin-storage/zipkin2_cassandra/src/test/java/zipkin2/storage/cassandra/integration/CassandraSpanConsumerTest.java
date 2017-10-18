@@ -82,9 +82,9 @@ abstract class CassandraSpanConsumerTest {
     accept(InternalForTests.withoutStrictTraceId(storage()), trace);
 
     assertThat(InternalForTests.rowCountForTraceByServiceSpan(storage()))
-      .isGreaterThanOrEqualTo(201L);
+      .isGreaterThanOrEqualTo(120L); // TODO: magic number
     assertThat(InternalForTests.rowCountForTraceByServiceSpan(storage()))
-      .isGreaterThanOrEqualTo(201L);
+      .isGreaterThanOrEqualTo(120L);
   }
 
   void accept(SpanConsumer consumer, Span... spans) throws IOException {
