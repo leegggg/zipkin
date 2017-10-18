@@ -22,7 +22,6 @@ import zipkin.BinaryAnnotation;
 import zipkin.Endpoint;
 import zipkin.Span;
 import zipkin.TestObjects;
-import zipkin.internal.ApplyTimestampAndDuration;
 import zipkin.internal.Util;
 import zipkin.internal.V2StorageComponent;
 import zipkin.storage.QueryRequest;
@@ -40,21 +39,6 @@ abstract class CassandraSpanStoreTest extends SpanStoreTest {
 
   @Override protected final StorageComponent storage() {
     return V2StorageComponent.create(v2Storage());
-  }
-
-  /** Cassandra indexing is performed separately, allowing the raw span to be stored unaltered. */
-  @Test
-  public void rawTraceStoredWithoutAdjustments() {
-    Span rawSpan = TestObjects.TRACE.get(1).toBuilder().timestamp(null).duration(null).build();
-    accept(rawSpan);
-
-    // At query time, timestamp and duration are added.
-    assertThat(store().getTrace(rawSpan.traceIdHigh, rawSpan.traceId))
-      .containsExactly(ApplyTimestampAndDuration.apply(rawSpan));
-
-    // Unlike other stores, Cassandra can show that timestamp and duration weren't reported
-    assertThat(store().getRawTrace(rawSpan.traceIdHigh, rawSpan.traceId))
-      .containsExactly(rawSpan);
   }
 
   @Test

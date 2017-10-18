@@ -50,7 +50,7 @@ public class ITCassandraStorage {
       return storage.get();
     }
 
-    @Override public void clear() {
+    @Before @Override public void clear() {
       storage.clear();
     }
   }
@@ -62,7 +62,7 @@ public class ITCassandraStorage {
       return storage.get();
     }
 
-    @Before public void clear() {
+    @Before @Override public void clear() {
       storage.clear();
     }
   }
@@ -83,7 +83,7 @@ public class ITCassandraStorage {
   public static class StrictTraceIdFalseTest extends CassandraStrictTraceIdFalseTest {
     @ClassRule public static CassandraStorageRule storage = classRule();
 
-    @Override public void clear() {
+    @Before @Override public void clear() {
       storage.clear();
     }
 
