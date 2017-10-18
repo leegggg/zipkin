@@ -186,7 +186,9 @@ public abstract class CassandraStorage extends StorageComponent {
 
   /** Truncates all the column families, or throws on any failure. */
   @VisibleForTesting void clear() {
-    if (provisioned) ((CassandraSpanConsumer) spanConsumer()).clear();
+    if (provisioned) {
+      ((CassandraSpanConsumer) spanConsumer()).clear();
+    }
 
     for (String cf : ImmutableList.of(
       Schema.TABLE_SPAN,

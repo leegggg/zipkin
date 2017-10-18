@@ -102,22 +102,34 @@ final class CassandraSpanConsumer implements SpanConsumer {
   public Call<Void> accept(List<Span> spans) {
     for (Span s : spans) {
       // indexing occurs by timestamp, so derive one if not present.
-      long timestamp = s.timestamp() != null ? s.timestamp() : guessTimestamp(s);
-      storeSpan(s, timestamp);
+      long ts_micro = s.timestamp() != null ? s.timestamp() : guessTimestamp(s);
+
+      // fallback to current time on the ts_uuid for span data, so we know when it was inserted
+      UUID ts_uuid = new UUID(
+        UUIDs.startOf(ts_micro != 0L ? (ts_micro / 1000L) : System.currentTimeMillis())
+          .getMostSignificantBits(),
+        UUIDs.random().getLeastSignificantBits());
+
+      storeSpan(s, ts_uuid);
+
+      // service span index is refreshed regardless of timestamp
+      String span = null != s.name() ? s.name() : "";
+      if (null != s.remoteServiceName()) { // allows getServices to return remote service names
+        storeServiceSpanName(s.remoteServiceName(), span);
+      }
+
+      String service = s.localServiceName();
+      if (null == service) continue; // all of the following indexes require a local service name
+
+      storeServiceSpanName(service, span);
+
+      if (ts_micro == 0L) continue; // search is only valid with a timestamp, don't index w/o it!
 
       // Contract for Repository.storeTraceServiceSpanName is to store the span twice, once with
       // the span name and another with empty string.
-      String localServiceName = s.localServiceName();
-      String spanName = null != s.name() ? s.name() : "";
-      if (null != localServiceName) {
-        storeTraceServiceSpanName(localServiceName, spanName, timestamp, s.duration(), s.traceId());
-        if (!spanName.isEmpty()) { // Allows lookup without the span name
-          storeTraceServiceSpanName(localServiceName, "", timestamp, s.duration(), s.traceId());
-        }
-        storeServiceSpanName(localServiceName, spanName);
-      }
-      if (null != s.remoteServiceName()) { // allows getServices to return remote service names
-        storeServiceSpanName(s.remoteServiceName(), spanName);
+      storeTraceServiceSpanName(s.traceId(), service, span, ts_micro, ts_uuid, s.duration());
+      if (!span.isEmpty()) { // Allows lookup without the span name
+        storeTraceServiceSpanName(s.traceId(), service, "", ts_micro, ts_uuid, s.duration());
       }
     }
     return Call.create(null /* Void == null */);
@@ -126,15 +138,13 @@ final class CassandraSpanConsumer implements SpanConsumer {
   /**
    * Store the span in the underlying storage for later retrieval.
    */
-  void storeSpan(Span span, long timestamp) {
+  void storeSpan(Span span, UUID ts_uuid) {
     try {
       boolean traceIdHigh = !strictTraceId && span.traceId().length() == 32;
 
       // start with the partition key
       BoundStatement bound = bindWithName(insertSpan, "insert-span")
-        .setUUID("ts_uuid", new UUID(
-          UUIDs.startOf(timestamp / 1000).getMostSignificantBits(),
-          UUIDs.random().getLeastSignificantBits()))
+        .setUUID("ts_uuid", ts_uuid)
         .setString("trace_id", traceIdHigh ? span.traceId().substring(16) : span.traceId())
         .setString("id", span.id());
 
@@ -189,24 +199,22 @@ final class CassandraSpanConsumer implements SpanConsumer {
   }
 
   void storeTraceServiceSpanName(
+      String traceId,
       String serviceName,
       String spanName,
-      long timestamp_micro,
-      Long duration,
-      String traceId) {
+      long ts_micro,
+      UUID ts_uuid,
+      Long duration) {
 
-    int bucket = durationIndexBucket(timestamp_micro);
-    UUID ts = new UUID(
-        UUIDs.startOf(timestamp_micro / 1000).getMostSignificantBits(),
-        UUIDs.random().getLeastSignificantBits());
+    int bucket = durationIndexBucket(ts_micro);
     try {
       BoundStatement bound =
           bindWithName(insertTraceServiceSpanName, "insert-trace-service-span-name")
+              .setString("trace_id", traceId)
               .setString("service", serviceName)
               .setString("span", spanName)
               .setInt("bucket", bucket)
-              .setUUID("ts", ts)
-              .setString("trace_id", traceId);
+              .setUUID("ts", ts_uuid);
 
       if (null != duration) {
         // round up to tens of milliseconds (or hundredths of seconds)
@@ -239,7 +247,7 @@ final class CassandraSpanConsumer implements SpanConsumer {
         return annotation.timestamp();
       }
     }
-    return TimeUnit.MILLISECONDS.toMicros(System.currentTimeMillis());
+    return 0L; // return a timestamp that won't match a query
   }
 
   void clear() {
