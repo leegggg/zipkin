@@ -175,16 +175,21 @@ final class CassandraSpanConsumer implements SpanConsumer {
       if (null != span.remoteEndpoint()) {
         bound = bound.set("r_ep", new EndpointUDT(span.remoteEndpoint()), EndpointUDT.class);
       }
+      boolean annotationQuery = false;
       if (!span.annotations().isEmpty()) {
+        annotationQuery = true;
         List<AnnotationUDT> annotations = span.annotations().stream()
           .map(a -> new AnnotationUDT(a))
           .collect(Collectors.toList());
-        bound = bound
-          .setList("annotations", annotations)
-          .setString("annotation_query", Joiner.on(',').join(CassandraUtil.annotationKeys(span)));
+        bound = bound.setList("annotations", annotations);
       }
       if (!span.tags().isEmpty()) {
+        annotationQuery = true;
         bound = bound.setMap("tags", span.tags());
+      }
+      if (annotationQuery) {
+        bound = bound.setString("annotation_query",
+          Joiner.on(',').join(CassandraUtil.annotationKeys(span)));
       }
       if (null != span.shared()) {
         bound = bound.setBool("shared", span.shared());
