@@ -222,10 +222,10 @@ final class CassandraSpanConsumer implements SpanConsumer {
               .setUUID("ts", ts_uuid);
 
       if (null != duration) {
+        // stored as milliseconds, not microseconds
         // round up to tens of milliseconds (or hundredths of seconds)
         long durationMillis = TimeUnit.MICROSECONDS.toMillis(duration);
-        long durationRoundedUp = durationMillis + (10 - durationMillis % 10);
-        bound = bound.setLong("duration", durationRoundedUp);
+        bound = bound.setLong("duration", durationMillis);
       }
       session.executeAsync(bound);
     } catch (RuntimeException ignore) {
