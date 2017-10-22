@@ -50,6 +50,10 @@ public class ITCassandraStorage {
       return storage.get();
     }
 
+    @Override Session session() {
+      return storage.session();
+    }
+
     @Before @Override public void clear() {
       storage.clear();
     }

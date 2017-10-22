@@ -13,8 +13,12 @@
  */
 package zipkin2.storage.cassandra.integration;
 
+import com.datastax.driver.core.Host;
+import com.datastax.driver.core.Session;
+import com.google.common.util.concurrent.Uninterruptibles;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.IntStream;
 import org.junit.Test;
 import zipkin.Annotation;
@@ -111,5 +115,21 @@ abstract class CassandraSpanStoreTest extends SpanStoreTest {
       }
     }
     super.accept(page.toArray(new Span[0]));
+
+    // Now, block until writes complete, notably so we can read them.
+    Session.State state = session().getState();
+    refresh:
+    while (true) {
+      for (Host host : state.getConnectedHosts()) {
+        if (state.getInFlightQueries(host) > 0) {
+          Uninterruptibles.sleepUninterruptibly(100, TimeUnit.MILLISECONDS);
+          state = session().getState();
+          continue refresh;
+        }
+      }
+      break;
+    }
   }
+
+  abstract Session session();
 }
