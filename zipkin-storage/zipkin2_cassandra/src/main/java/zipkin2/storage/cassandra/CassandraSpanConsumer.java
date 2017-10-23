@@ -18,26 +18,31 @@ import com.datastax.driver.core.PreparedStatement;
 import com.datastax.driver.core.Session;
 import com.datastax.driver.core.querybuilder.QueryBuilder;
 import com.datastax.driver.core.utils.UUIDs;
+import com.google.common.base.Function;
 import com.google.common.base.Joiner;
 import com.google.common.base.Preconditions;
+import com.google.common.util.concurrent.Futures;
+import com.google.common.util.concurrent.ListenableFuture;
+import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import zipkin2.Annotation;
 import zipkin2.Call;
 import zipkin2.Span;
 import zipkin2.storage.SpanConsumer;
+import zipkin2.storage.cassandra.DeduplicatingExecutor.BoundStatementKey;
 import zipkin2.storage.cassandra.Schema.AnnotationUDT;
 import zipkin2.storage.cassandra.Schema.EndpointUDT;
 
-import static zipkin2.storage.cassandra.CassandraUtil.bindWithName;
 import static zipkin2.storage.cassandra.CassandraUtil.durationIndexBucket;
 
-final class CassandraSpanConsumer implements SpanConsumer {
-  private static final Logger LOG = LoggerFactory.getLogger(CassandraSpanConsumer.class);
+class CassandraSpanConsumer implements SpanConsumer { // not final for testing
+  static final Call<Void> NULL_CALL = Call.create(null);
+  static final Joiner COMMA_JOINER = Joiner.on(',');
 
   private static final long WRITTEN_NAMES_TTL
       = Long.getLong("zipkin2.storage.cassandra.internal.writtenNamesTtl", 60 * 60 * 1000);
@@ -100,6 +105,10 @@ final class CassandraSpanConsumer implements SpanConsumer {
    */
   @Override
   public Call<Void> accept(List<Span> spans) {
+    if (spans.isEmpty()) return NULL_CALL;
+
+    List<BoundStatement> statements = new ArrayList<>();
+    Set<BoundStatementKey> keys = new LinkedHashSet<>();
     for (Span s : spans) {
       // indexing occurs by timestamp, so derive one if not present.
       long ts_micro = s.timestamp() != null ? s.timestamp() : guessTimestamp(s);
@@ -110,100 +119,94 @@ final class CassandraSpanConsumer implements SpanConsumer {
           .getMostSignificantBits(),
         UUIDs.random().getLeastSignificantBits());
 
-      storeSpan(s, ts_uuid);
+      statements.add(storeSpan(s, ts_uuid));
 
       // service span index is refreshed regardless of timestamp
       String span = null != s.name() ? s.name() : "";
       if (null != s.remoteServiceName()) { // allows getServices to return remote service names
-        storeServiceSpanName(s.remoteServiceName(), span);
+        keys.add(storeServiceSpanName(s.remoteServiceName(), span));
       }
 
       String service = s.localServiceName();
       if (null == service) continue; // all of the following indexes require a local service name
 
-      storeServiceSpanName(service, span);
+      keys.add(storeServiceSpanName(service, span));
 
       if (ts_micro == 0L) continue; // search is only valid with a timestamp, don't index w/o it!
 
       // Contract for Repository.storeTraceServiceSpanName is to store the span twice, once with
       // the span name and another with empty string.
-      storeTraceServiceSpanName(s.traceId(), service, span, ts_micro, ts_uuid, s.duration());
-      if (!span.isEmpty()) { // Allows lookup without the span name
-        storeTraceServiceSpanName(s.traceId(), service, "", ts_micro, ts_uuid, s.duration());
-      }
+      statements.add(
+        storeTraceServiceSpanName(s.traceId(), service, span, ts_micro, ts_uuid, s.duration())
+      );
+      if (span.isEmpty()) continue;
+      statements.add( // Allows lookup without the span name
+        storeTraceServiceSpanName(s.traceId(), service, "", ts_micro, ts_uuid, s.duration())
+      );
     }
-    return Call.create(null /* Void == null */);
+    return new StoreSpansCall(statements, keys);
   }
 
-  /**
-   * Store the span in the underlying storage for later retrieval.
-   */
-  void storeSpan(Span span, UUID ts_uuid) {
-    try {
-      boolean traceIdHigh = !strictTraceId && span.traceId().length() == 32;
+  /** Store the span in the underlying storage for later retrieval. */
+  BoundStatement storeSpan(Span span, UUID ts_uuid) {
+    boolean traceIdHigh = !strictTraceId && span.traceId().length() == 32;
 
-      // start with the partition key
-      BoundStatement bound = bindWithName(insertSpan, "insert-span")
-        .setUUID("ts_uuid", ts_uuid)
-        .setString("trace_id", traceIdHigh ? span.traceId().substring(16) : span.traceId())
-        .setString("id", span.id());
+    // start with the partition key
+    BoundStatement bound = bindWithName(insertSpan, "insert-span")
+      .setUUID("ts_uuid", ts_uuid)
+      .setString("trace_id", traceIdHigh ? span.traceId().substring(16) : span.traceId())
+      .setString("id", span.id());
 
-      // now set the data fields
-      if (traceIdHigh) {
-        bound = bound.setString("trace_id_high", span.traceId().substring(0, 16));
-      }
-      if (null != span.parentId()) {
-        bound = bound.setString("parent_id", span.parentId());
-      }
-      if (null != span.kind()) {
-        bound = bound.setString("kind", span.kind().name());
-      }
-      if (null != span.name()) {
-        bound = bound.setString("span", span.name());
-      }
-      if (null != span.timestamp()) {
-        bound = bound.setLong("ts", span.timestamp());
-      }
-      if (null != span.duration()) {
-        bound = bound.setLong("duration", span.duration());
-      }
-      if (null != span.localEndpoint()) {
-        bound = bound
-                .set("l_ep", new EndpointUDT(span.localEndpoint()), EndpointUDT.class)
-                .setString("l_service", span.localServiceName());
-      }
-      if (null != span.remoteEndpoint()) {
-        bound = bound.set("r_ep", new EndpointUDT(span.remoteEndpoint()), EndpointUDT.class);
-      }
-      boolean annotationQuery = false;
-      if (!span.annotations().isEmpty()) {
-        annotationQuery = true;
-        List<AnnotationUDT> annotations = span.annotations().stream()
-          .map(a -> new AnnotationUDT(a))
-          .collect(Collectors.toList());
-        bound = bound.setList("annotations", annotations);
-      }
-      if (!span.tags().isEmpty()) {
-        annotationQuery = true;
-        bound = bound.setMap("tags", span.tags());
-      }
-      if (annotationQuery) {
-        bound = bound.setString("annotation_query",
-          Joiner.on(',').join(CassandraUtil.annotationKeys(span)));
-      }
-      if (null != span.shared()) {
-        bound = bound.setBool("shared", span.shared());
-      }
-      if (null != span.debug()) {
-        bound = bound.setBool("debug", span.debug());
-      }
-      session.executeAsync(bound);
-    } catch (RuntimeException ignore) {
-      LOG.error(ignore.getMessage(), ignore);
+    // now set the data fields
+    if (traceIdHigh) {
+      bound.setString("trace_id_high", span.traceId().substring(0, 16));
     }
+    if (null != span.parentId()) {
+      bound.setString("parent_id", span.parentId());
+    }
+    if (null != span.kind()) {
+      bound.setString("kind", span.kind().name());
+    }
+    if (null != span.name()) {
+      bound.setString("span", span.name());
+    }
+    if (null != span.timestamp()) {
+      bound.setLong("ts", span.timestamp());
+    }
+    if (null != span.duration()) {
+      bound.setLong("duration", span.duration());
+    }
+    if (null != span.localEndpoint()) {
+      bound
+        .set("l_ep", new EndpointUDT(span.localEndpoint()), EndpointUDT.class)
+        .setString("l_service", span.localServiceName());
+    }
+    if (null != span.remoteEndpoint()) {
+      bound.set("r_ep", new EndpointUDT(span.remoteEndpoint()), EndpointUDT.class);
+    }
+    if (!span.annotations().isEmpty()) {
+      List<AnnotationUDT> annotations = span.annotations().stream()
+        .map(a -> new AnnotationUDT(a))
+        .collect(Collectors.toList());
+      bound.setList("annotations", annotations);
+    }
+    if (!span.tags().isEmpty()) {
+      bound.setMap("tags", span.tags());
+    }
+    Set<String> annotationQuery = CassandraUtil.annotationKeys(span);
+    if (!annotationQuery.isEmpty()) {
+      bound.setString("annotation_query", COMMA_JOINER.join(annotationQuery));
+    }
+    if (null != span.shared()) {
+      bound.setBool("shared", span.shared());
+    }
+    if (null != span.debug()) {
+      bound.setBool("debug", span.debug());
+    }
+    return bound;
   }
 
-  void storeTraceServiceSpanName(
+  BoundStatement storeTraceServiceSpanName(
       String traceId,
       String serviceName,
       String spanName,
@@ -212,37 +215,29 @@ final class CassandraSpanConsumer implements SpanConsumer {
       Long duration) {
 
     int bucket = durationIndexBucket(ts_micro);
-    try {
-      BoundStatement bound =
-          bindWithName(insertTraceServiceSpanName, "insert-trace-service-span-name")
-              .setString("trace_id", traceId)
-              .setString("service", serviceName)
-              .setString("span", spanName)
-              .setInt("bucket", bucket)
-              .setUUID("ts", ts_uuid);
+    BoundStatement bound =
+        bindWithName(insertTraceServiceSpanName, "insert-trace-service-span-name")
+            .setString("trace_id", traceId)
+            .setString("service", serviceName)
+            .setString("span", spanName)
+            .setInt("bucket", bucket)
+            .setUUID("ts", ts_uuid);
 
-      if (null != duration) {
-        // stored as milliseconds, not microseconds
-        // round up to tens of milliseconds (or hundredths of seconds)
-        long durationMillis = TimeUnit.MICROSECONDS.toMillis(duration);
-        bound = bound.setLong("duration", durationMillis);
-      }
-      session.executeAsync(bound);
-    } catch (RuntimeException ignore) {
-      LOG.error(ignore.getMessage(), ignore);
+    if (null != duration) {
+      // stored as milliseconds, not microseconds
+      // round up to tens of milliseconds (or hundredths of seconds)
+      long durationMillis = TimeUnit.MICROSECONDS.toMillis(duration);
+      bound.setLong("duration", durationMillis);
     }
+    return bound;
   }
 
-  void storeServiceSpanName(String serviceName, String spanName) {
-    try {
-      BoundStatement bound = bindWithName(insertServiceSpanName, "insert-service-span-name")
-          .setString("service", serviceName)
-          .setString("span", spanName);
+  BoundStatementKey storeServiceSpanName(String serviceName, String spanName) {
+    BoundStatement bound = bindWithName(insertServiceSpanName, "insert-service-span-name")
+      .setString("service", serviceName)
+      .setString("span", spanName);
 
-      deduplicatingExecutor.maybeExecuteAsync(bound, serviceName + '෴' + spanName);
-    } catch (RuntimeException ignore) {
-      LOG.error(ignore.getMessage(), ignore);
-    }
+    return new BoundStatementKey(bound, serviceName + '෴' + spanName);
   }
 
   private static long guessTimestamp(Span span) {
@@ -257,5 +252,35 @@ final class CassandraSpanConsumer implements SpanConsumer {
 
   void clear() {
     deduplicatingExecutor.clear();
+  }
+
+  class StoreSpansCall extends ListenableFutureCall<Void> {
+    final List<BoundStatement> statements;
+    final Set<BoundStatementKey> serviceSpanKeys;
+
+    StoreSpansCall(List<BoundStatement> statements, Set<BoundStatementKey> serviceSpanKeys) {
+      this.statements = statements;
+      this.serviceSpanKeys = serviceSpanKeys;
+    }
+
+    @Override protected ListenableFuture<Void> newFuture() {
+      List<ListenableFuture<?>> futures = new ArrayList<>(statements.size());
+      for (BoundStatement statement : statements) {
+        futures.add(session.executeAsync(statement));
+      }
+      for (BoundStatementKey key : serviceSpanKeys) {
+        futures.add(deduplicatingExecutor.maybeExecuteAsync(key));
+      }
+      return Futures.transform(Futures.allAsList(futures),
+        (Function<List<Object>, Void>) input -> null);
+    }
+
+    @Override public StoreSpansCall clone() {
+      return new StoreSpansCall(statements, serviceSpanKeys);
+    }
+  }
+
+  BoundStatement bindWithName(PreparedStatement prepared, String name) { // overridable for tests
+    return CassandraUtil.bindWithName(prepared, name);
   }
 }

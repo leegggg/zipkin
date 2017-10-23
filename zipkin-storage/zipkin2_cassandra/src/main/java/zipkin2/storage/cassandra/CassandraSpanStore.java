@@ -460,7 +460,7 @@ final class CassandraSpanStore implements SpanStore {
 
             long maxDuration = TimeUnit.MICROSECONDS
                     .toMillis(null != request.maxDuration() ? request.maxDuration() : Long.MAX_VALUE);
-            
+
             bound = bound.setLong("start_duration", minDuration).setLong("end_duration", maxDuration);
           }
           bound.setFetchSize(request.limit());
